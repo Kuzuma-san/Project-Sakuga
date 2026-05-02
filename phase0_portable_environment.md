@@ -68,7 +68,7 @@ This table maps every failure mode from the real world to the specific file in t
 | Lockfile deleted or gitignored | `.gitignore` rules + this guide |
 | Wrong Postgres version | Docker Compose with pinned `postgres:16-alpine` |
 | Wrong Redis version | Docker Compose with pinned `redis:7.2-alpine` |
-| Wrong Kafka version | Docker Compose with pinned `confluentinc/cp-kafka:7.6.1` |
+| Wrong Kafka version | Docker Compose with pinned `confluentinc/cp-kafka:7.5.0` |
 | Missing environment variable crashes at runtime | NestJS startup validation via `class-validator` |
 | `.env` committed to git (secret leak) | `.gitignore` + `.env.example` pattern |
 | No one knows what env vars are needed | `.env.example` documents every key |
@@ -129,14 +129,14 @@ docker compose version
 ### 3.3 — Install `pnpm`
 
 ```bash
-npm install -g pnpm@9
+npm install -g pnpm@8
 
 # Verify:
 pnpm --version
-# Expected: 9.x.x
+# Expected: 8.x.x
 ```
 
-Why pnpm 9 specifically? Phase 1 of this project uses pnpm workspace features and lockfile format that are stable in pnpm 9. pnpm 8 produces a different lockfile format and the `preinstall` guard will reject it.
+Why pnpm 8 specifically? Phase 1 of this project targets pnpm 8.x and its workspace behavior. Pinning the major version prevents lockfile drift between machines.
 
 ---
 
@@ -153,7 +153,7 @@ That is the entire file. One line. The exact Node.js LTS version the entire proj
 
 **Why this exact version?**
 - Node 20 is the current LTS (Long Term Support) line — security patches until April 2026
-- NestJS 10, Next.js 14, and all packages in Phases 1–5 are tested against Node 20
+- NestJS 10, React 18, Vite 5, and all packages in Phases 1–5 are tested against Node 20
 - Node 22 (current) introduced changes to the `fs` module and `fetch` API that create subtle differences with some NestJS internals
 - Node 18 is end-of-life
 
@@ -187,7 +187,7 @@ node --version
   "private": true,
   "engines": {
     "node": "20.14.0",
-    "pnpm": ">=9.0.0 <10.0.0"
+    "pnpm": ">=8.0.0 <9.0.0"
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
@@ -439,7 +439,7 @@ Prisma migrations run as the application user (`sakuga_user`). Installing Postgr
 # ═══════════════════════════════════════════════════════════════════════════════
 # SAKUGA — Docker Compose Development Infrastructure
 # ═══════════════════════════════════════════════════════════════════════════════
-# Services: PostgreSQL 16, Redis 7.2, Zookeeper, Kafka 7.6
+# Services: PostgreSQL 16, Redis 7.2, Zookeeper, Kafka 7.5
 # Start:    docker compose up -d
 # Stop:     docker compose down
 # Wipe:     docker compose down -v   (removes volumes — ALL DATA GONE)
@@ -512,10 +512,10 @@ services:
 
   # ─── ZOOKEEPER ──────────────────────────────────────────────────────────────
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.1
+    image: confluentinc/cp-zookeeper:7.5.0
     # Zookeeper coordinates Kafka brokers: leader election, consumer group offsets,
     # broker metadata. Required by Kafka (used in Phases 3 and 4).
-    # Kafka 3.3+ supports KRaft mode (no Zookeeper) but Confluent 7.6 with
+    # Kafka 3.3+ supports KRaft mode (no Zookeeper) but Confluent 7.5 with
     # Zookeeper is more stable for local development.
     container_name: sakuga_zookeeper
     restart: unless-stopped
@@ -529,7 +529,7 @@ services:
     networks:
       - sakuga_network
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      test: ["CMD-SHELL", "nc -z localhost 2181"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -537,7 +537,7 @@ services:
 
   # ─── KAFKA ──────────────────────────────────────────────────────────────────
   kafka:
-    image: confluentinc/cp-kafka:7.6.1
+    image: confluentinc/cp-kafka:7.5.0
     # Kafka is used as the event bus for:
     # - library.entry.created / updated (Phase 3)
     # - user.activity.created (Phase 4 fan-out processor)
@@ -879,7 +879,7 @@ test-env:
 check-prerequisites:
 	@echo "→ Checking prerequisites..."
 	@command -v docker > /dev/null 2>&1 || (echo "✗ Docker not found. Install from https://docker.com" && exit 1)
-	@command -v pnpm > /dev/null 2>&1 || (echo "✗ pnpm not found. Run: npm install -g pnpm@9" && exit 1)
+	@command -v pnpm > /dev/null 2>&1 || (echo "✗ pnpm not found. Run: npm install -g pnpm@8" && exit 1)
 	@echo "  ✓ All prerequisites found"
 ```
 
@@ -1097,7 +1097,7 @@ The README is the first thing anyone reads. It must answer exactly three questio
 
 A personal manga and anime tracker with social features, AI-powered insights, and real-time activity — built as a full-stack learning project.
 
-**Tech stack:** NestJS · Next.js · PostgreSQL · Redis · Kafka · Socket.io · Prisma · TypeScript · pnpm monorepo
+**Tech stack:** NestJS · React · Vite · PostgreSQL · Redis · Kafka · Socket.io · Prisma · TypeScript · pnpm monorepo
 
 ---
 
@@ -1109,13 +1109,13 @@ Install these **before** cloning. They are the only manual setup required.
 |------|---------|---------|
 | nvm | Latest | [github.com/nvm-sh/nvm](https://github.com/nvm-sh/nvm) |
 | Docker Desktop | Latest | [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/) |
-| pnpm | 9.x | `npm install -g pnpm@9` |
+| pnpm | 8.x | `npm install -g pnpm@8` |
 
 Verify:
 ```bash
 nvm --version   # 0.39.x or higher
 docker --version # 25.x or higher
-pnpm --version   # 9.x.x
+pnpm --version   # 8.x.x
 ```
 
 ---
@@ -1227,7 +1227,7 @@ make test-env
 
 # Expected output:
 # → Node version: v20.14.0
-# → pnpm version: 9.x.x
+# → pnpm version: 8.x.x
 # → Docker services: all running/healthy
 # → PostgreSQL connection: PostgreSQL OK
 # → Redis connection: PONG
@@ -1244,7 +1244,7 @@ Before moving to Phase 1, verify every item:
 
 ```
 [ ] .nvmrc exists with "20.14.0" — only one line, no trailing space
-[ ] root package.json has engines: { node: "20.14.0", pnpm: ">=9.0.0 <10.0.0" }
+[ ] root package.json has engines: { node: "20.14.0", pnpm: ">=8.0.0 <9.0.0" }
 [ ] root package.json has pnpm.engine-strict: true
 [ ] preinstall script runs only-allow pnpm
 [ ] pnpm-lock.yaml is committed and NOT in .gitignore
@@ -1252,7 +1252,7 @@ Before moving to Phase 1, verify every item:
 [ ] .gitattributes prevents line ending issues on Windows
 [ ] .env.example exists with ALL required keys documented
 [ ] .env is in .gitignore (verify with: git status — .env should not appear)
-[ ] docker-compose.yml uses pinned versions (postgres:16-alpine, redis:7.2-alpine, confluent 7.6.1)
+[ ] docker-compose.yml uses pinned versions (postgres:16-alpine, redis:7.2-alpine, confluent 7.5.0)
 [ ] docker/postgres/init.sql creates pgcrypto, pg_trgm, unaccent extensions
 [ ] Docker healthchecks are defined for postgres and redis
 [ ] Makefile has setup, start, stop, reset, test-env commands
@@ -1334,7 +1334,7 @@ docker compose down && docker compose up -d
 
 ```bash
 # pnpm must be installed before setup:
-npm install -g pnpm@9
+npm install -g pnpm@8
 # Then retry:
 make setup
 ```
@@ -1352,8 +1352,8 @@ sleep 10 && pnpm db:migrate
 ```bash
 # This happens when different pnpm versions are used across machines
 # Enforce a specific pnpm version:
-# In package.json engines: { "pnpm": ">=9.0.0 <10.0.0" }
-# Everyone must then install: npm install -g pnpm@9
+# In package.json engines: { "pnpm": ">=8.0.0 <9.0.0" }
+# Everyone must then install: npm install -g pnpm@8
 
 # Also check .gitattributes — Windows line endings can corrupt lockfiles
 # The .gitattributes in Step 0.5 prevents this

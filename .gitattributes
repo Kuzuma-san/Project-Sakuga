@@ -1,0 +1,18 @@
+# Default: auto-detect text files and normalize line endings
+* text=auto
+
+# Lockfiles must stay exactly as committed — no line ending conversion
+pnpm-lock.yaml text eol=lf
+*.json text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.md text eol=lf
+
+# Binary files — never touch
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff2 binary
+*.woff binary

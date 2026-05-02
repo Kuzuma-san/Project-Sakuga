@@ -1,0 +1,187 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# SAKUGA — Docker Compose Development Infrastructure
+# ═══════════════════════════════════════════════════════════════════════════════
+# Services: PostgreSQL 16, Redis 7.2, Zookeeper, Kafka 7.5.0, pgAdmin 8
+# Start:    docker compose up -d
+# Stop:     docker compose down
+# Wipe:     docker compose down -v   (removes volumes — ALL DATA GONE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ─── POSTGRESQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    # alpine = minimal Linux base — smaller image, faster pull
+    # 16 = PostgreSQL major version (matches Phase 1 schema design)
+    container_name: sakuga_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sakuga_user
+      POSTGRES_PASSWORD: sakuga_dev_password
+      POSTGRES_DB: sakuga_db
+      # Performance tuning for development (not production defaults)
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    ports:
+      # host:container — exposes to localhost for Prisma Studio, pgAdmin, etc.
+      - "5432:5432"
+    volumes:
+      # Named volume: data persists when container stops (survives `docker compose down`)
+      # Data is ONLY deleted with `docker compose down -v`
+      - postgres_data:/var/lib/postgresql/data
+      # Init scripts: run once on first container creation, in alphabetical order
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sakuga_user -d sakuga_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - sakuga_network
+
+  # ─── REDIS ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    # 7.2 = Redis major.minor version
+    # Used for: BullMQ job queues, rate limiting, session cache,
+    #           presence TTLs (Phase 5), Socket.io Redis adapter (Phase 5)
+    container_name: sakuga_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass sakuga_redis_password
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    # --requirepass: Redis with no password is a serious security risk
+    # --appendonly yes: AOF persistence — Redis writes every command to disk
+    #   Without this, a container restart loses ALL data (queued jobs, cache, etc.)
+    # --maxmemory 256mb: prevents Redis from consuming all host RAM in development
+    # --maxmemory-policy allkeys-lru: when full, evict least recently used keys
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "sakuga_redis_password", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - sakuga_network
+
+  # ─── ZOOKEEPER ──────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    # Zookeeper coordinates Kafka brokers: leader election, consumer group offsets,
+    # broker metadata. Required by Kafka (used in Phases 3 and 4).
+    # Kafka 3.3+ supports KRaft mode (no Zookeeper) but Confluent 7.5 with
+    # Zookeeper is more stable for local development.
+    container_name: sakuga_zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    networks:
+      - sakuga_network
+    healthcheck:
+      # Confluent disables most Zookeeper 4-letter commands by default.
+      # For local dev readiness, a successful TCP connection is enough for Kafka startup.
+      test: ["CMD-SHELL", "nc -z localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─── PGADMIN ────────────────────────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:8
+    # Browser UI for inspecting PostgreSQL during development.
+    # Open http://localhost:5050 and register the server as host: postgres, port: 5432.
+    container_name: sakuga_pgadmin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@sakuga.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-sakuga_pgadmin_password}
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - sakuga_network
+
+  # ─── KAFKA ──────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    # Kafka is used as the event bus for:
+    # - library.entry.created / updated (Phase 3)
+    # - user.activity.created (Phase 4 fan-out processor)
+    # - analytics events (Phase 4)
+    container_name: sakuga_kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      # 9092: accessible from your host machine (used by NestJS running on host)
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Two listener configs:
+      # PLAINTEXT — used by services inside the Docker network (container-to-container)
+      # PLAINTEXT_HOST — used from your host machine (localhost:9092)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Development: auto-create topics (Phase 3 creates them explicitly, but this
+      # prevents startup errors if topics are referenced before creation)
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_LOG4J_LOGGERS: "kafka=WARN,kafka.controller=WARN,kafka.log.LogCleaner=WARN,state.change.logger=WARN,kafka.producer.async.DefaultEventHandler=WARN"
+      # Reduce log retention for development (default 7 days is excessive)
+      KAFKA_LOG_RETENTION_HOURS: 24
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - sakuga_network
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+# ─── VOLUMES ──────────────────────────────────────────────────────────────────
+# Named volumes persist data between `docker compose stop/start`.
+# They are removed only with `docker compose down -v`.
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  zookeeper_data:
+    driver: local
+  zookeeper_logs:
+    driver: local
+  kafka_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+# ─── NETWORK ──────────────────────────────────────────────────────────────────
+# A dedicated bridge network so services can reach each other by service name.
+# postgres:5432, redis:6379, kafka:29092 are the hostnames inside this network.
+networks:
+  sakuga_network:
+    driver: bridge
