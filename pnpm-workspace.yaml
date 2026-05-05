@@ -1,0 +1,7 @@
+# pnpm-workspace.yaml tells pnpm:
+# "Every folder inside packages/ is one project package."
+
+packages:
+  - "packages/*"
+
+#pnpm automatically creates symlinks so @repo/types is importable from @repo/backend and@repo/frontend without publishing to npm.
