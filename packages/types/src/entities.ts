@@ -141,14 +141,14 @@ export interface Comment extends BaseEntity {
 // ACTIVITY FEED
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface ActivityFeed extends BaseEntity{
+export interface ActivityEntry extends BaseEntity{
     userId:     string,
     actorId:    string,
     type:       string,                       // 'library_add' | 'library_complete' | 'review_post
     titleId:    string | null,
-    metadata:   Record<string, unknown>,  // Flexible JSON payload
+    metadata:   Record<string, unknown>,      // Flexible JSON payload
     actor:      PublicUser,
-    title:      Title,
+    title?:      Title,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

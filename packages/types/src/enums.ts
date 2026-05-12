@@ -29,6 +29,7 @@ export enum TitleType {
     MANHWA  = 'manhwa',
     MANHUA  = 'manhua',
     NOVEL   = 'novel',  // Light novels tracked as manga-mode content
+    MOVIE   = 'movie',
     OVA     = 'ova',
     SPECIAL = 'special',
 }

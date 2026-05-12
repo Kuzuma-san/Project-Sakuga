@@ -1,0 +1,500 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sakuga — Complete Database Schema
+// 12 tables covering all features through Phase 8.
+// Every index is justified. Every constraint is documented.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 1. Generator — tells Prisma what to generate
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearch"]
+}
+
+// 2. Datasource — your DB connection
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 3. Models — your tables
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER
+// The central entity. Connects to every other table.
+// Password is bcrypt-hashed. Never stored in plaintext.
+// passwordHash is nullable because Google OAuth users have no password —
+// they authenticate via Google and never need one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+//Anything starting with @ is an attribute
+//@map() tells Prisma: "the field is called X in TypeScript, but call it Y in the database."
+//@@map()  // Same as @map() but for table name and not columns. We use these to follow SQL convention for naming in Database and using CamelCases in typescript
+//Without this the users table in DB would be User and the columns name will be passwordHash instead of conventional password_hash
+
+model User {
+  id                     String    @id @default(uuid()) @db.Uuid
+  email                  String    @unique
+  username               String    @unique
+  passwordHash           String?   @map("password_hash") // ? means the value can be null...Same as string|null for typescript
+  // nullable: Google OAuth users have no password
+  displayName            String?   @map("display_name")
+  avatarUrl              String?   @map("avatar_url")
+  bio                    String?
+  preferredMode          String    @default("anime") @map("preferred_mode")
+  // 'anime' | 'manga' — stored as string for flexibility
+  role                   String    @default("user")
+  // 'user' | 'admin'
+  subscription           String    @default("free")
+  // 'free' | 'pro'
+  hasCompletedOnboarding Boolean   @default(false) @map("has_completed_onboarding")
+  isEmailVerified        Boolean   @default(false) @map("is_email_verified")
+  emailVerificationToken String?   @map("email_verification_token")
+  passwordResetToken     String?   @map("password_reset_token")
+  passwordResetExpiresAt DateTime? @map("password_reset_expires_at")
+  googleId               String?   @unique @map("google_id")
+  // Null for email/password users. Unique for Google OAuth users.
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  // ── RELATIONS ──
+  libraryEntries LibraryEntry[] //this line produces zero new columns in the users table. It exists purely for TypeScript — so you can navigate from a User to their LibraryEntries in your code.
+  //    const user = await prisma.user.findUnique({
+  //       where: { id: userId },
+  //       include: { libraryEntries: true } // ← this name
+  //     })
+  //     user.libraryEntries // array of LibraryEntry objects
+
+  //     libraryEntries LibraryEntry[]: this line alone doesn't define the join condition. Prisma figures out the relationship by looking at both sides together.
+  //     On user: libraryEntries LibraryEntry[]
+  //     On LibraryEntry: userId String @map("user_id") @db.Uuid
+  //                   user   User   @relation(fields: [userId], references: [id])
+  //     The @relation on LibraryEntry is where the actual join is defined:
+  //       fields: [userId] → the foreign key column on LibraryEntry
+  //       references: [id] → it points to the id column on User
+  //     These are Same as @ForeignKey and @BelongsTo in Sequelize where we used to make the userId a column of number and user:User made the relation bw the user and the curr table
+  //     Just used for internal Join when made include: libraryEntries:true which joins the user with id:id to the libraryEntries of that user
+
+  refreshTokens     RefreshToken[]
+  // Friendships where this user sent the request
+  sentRequests      Friendship[]          @relation("FriendshipRequester")
+  receivedRequests Friendship[]          @relation("FriendshipAddressee")
+  comments          Comment[]
+  // Feed entries this user should see (fan-out on write)
+  feedEntries       ActivityFeed[]        @relation("FeedRecipient")
+  // Activities this user created (being followed by others)
+  activities        ActivityFeed[]        @relation("FeedActor")
+  notifications     Notification[]
+  onboardingSeeds   OnboardingSelection[]
+  commentReactions  CommentReaction[]
+
+  // Indexes: 
+  @@index([email]) // Fast lookup on login
+  @@index([username]) // Fast lookup on profile view and friend search
+  @@index([googleId]) // Fast lookup on Google OAuth callback
+  @@index([subscription]) // Fast lookup for subscription-based queries (analytics)
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REFRESH TOKEN
+// Stores hashed refresh tokens for rotation-based security.
+// See Phase 2 for the full rotation security model.
+// familyId groups all rotations from one original login session —
+// detecting a revoked token from a family triggers revocation of all family tokens.
+// ─────────────────────────────────────────────────────────────────────────────
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  // SHA-256 hash of the actual token. Never stored in plaintext.
+  familyId  String    @map("family_id") @db.Uuid
+  // All rotations from one login session share this ID.
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  // null = still valid. Set on use (rotation) or explicit logout.
+  createdAt DateTime  @default(now()) @map("created_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // tokenHash has a @@unique above which automatically creates an index.
+
+  @@index([userId]) // "revoke all tokens for a user on logout"
+  @@index([familyId]) // "revoke all tokens in a family on theft detection"
+  // onDelete: Cascade — deleting a user removes all their tokens.
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TITLE
+// Any trackable content: anime, manga, manhwa, manhua, movie, OVA, novel.
+// Data sourced from Jikan API (MyAnimeList) and/or AniList API.
+// externalId: "jikan:40748" or "anilist:101517" — prevents duplicate entries
+// from different sync runs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Title {
+  id              String                   @id @default(uuid()) @db.Uuid
+  externalId      String                   @unique @map("external_id")
+  // "jikan:{malId}" or "anilist:{anilistId}" — unique identifier from data source
+  source          String                   @map("source")
+  // 'jikan' | 'anilist' | 'manual'
+  type            String
+  // 'anime' | 'manga' | 'manhwa' | 'manhua' | 'movie' | 'ova' | 'special'
+  titleEn         String?                  @map("title_en")
+  titleJa         String?                  @map("title_ja")
+  titleRomaji     String?                  @map("title_romaji")
+  synopsis        String?
+  coverImageUrl   String?                  @map("cover_image_url")
+  bannerImageUrl  String?                  @map("banner_image_url")
+  totalChapters   Int?                     @map("total_chapters")
+  // null = ongoing or unknown
+  totalEpisodes   Int?                     @map("total_episodes")
+  totalVolumes    Int?                     @map("total_volumes")
+  status          String                   @default("unknown")
+  // 'airing' | 'finished' | 'not_yet_aired' | 'unknown'
+  score           Float?
+  // Average community score 0-10
+  popularity      Int?
+  // Rank by save count or external popularity metric
+  year            Int?
+  season          String?
+  // 'spring' | 'summer' | 'fall' | 'winter'
+  malId           Int?                     @unique @map("mal_id")
+  // MyAnimeList ID — null for AniList-only titles
+  anilistId       Int?                     @unique @map("anilist_id")
+  // AniList ID — null for Jikan-only titles
+  lastSyncedAt    DateTime                 @default(now()) @map("last_synced_at")
+  // When was this title last refreshed from the source API?
+  // Used by the sync worker to determine which titles need updating.
+  searchVector    Unsupported("tsvector")? @map("search_vector")
+  // Full-text search vector — computed column updated by a PostgreSQL trigger.
+  // This is the GIN-indexed field that powers title search.
+  createdAt       DateTime                 @default(now()) @map("created_at")
+  updatedAt       DateTime                 @updatedAt @map("updated_at")
+  genres          TitleGenre[]
+  libraryEntries  LibraryEntry[]
+  comments        Comment[]
+  activityFeed    ActivityFeed[]
+  onboardingSeeds OnboardingSelection[]
+  // The GIN index on searchVector is added via raw SQL in the migration — Prisma
+  // does not support GIN index syntax natively. See migration notes at end of Step
+
+  @@index([type]) // Filter anime vs manga vs manhwa
+  @@index([score]) // "top scored" queries
+  @@index([popularity]) // "most popular" queries
+  @@index([year, season]) // "titles from spring 2024" queries
+  @@index([lastSyncedAt]) // Sync worker: "find stale titles"
+  @@index([source]) // "all Jikan titles" vs "all AniList titles"
+  @@map("titles")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GENRE
+// Genres are normalised into their own table to allow:
+// - filtering by genre without string comparison
+// - analytics: "which genre does this user read most?"
+// - consistent genre names across Jikan and AniList (we normalise on sync)
+// ─────────────────────────────────────────────────────────────────────────────
+model Genre {
+  id     String       @id @default(uuid()) @db.Uuid
+  name   String       @unique // "Action", "Romance", "Slice of Life"
+  slug   String       @unique // "action", "romance", "slice-of-life"
+  titles TitleGenre[]
+
+  @@map("genres")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TITLE_GENRE — Junction Table for Title <-> Genre M:N
+// A title can have many genres A genre belongs to many titles
+// This is the junction table pattern for M:N relationships.
+// Why not just a genres: String[] column on Title?
+// - Arrays cannot be efficiently indexed or joined
+// - You cannot efficiently query "all titles with genre X"
+// - You cannot add metadata about the relationship (e.g., isPrimary genre)
+// ─────────────────────────────────────────────────────────────────────────────
+model TitleGenre {
+  titleId String @map("title_id") @db.Uuid
+  genreId String @map("genre_id") @db.Uuid
+  title   Title  @relation(fields: [titleId], references: [id], onDelete: Cascade)
+  genre   Genre  @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@id([titleId, genreId]) // Composite PK: no duplicate (title, genre) pairs
+  @@index([titleId]) // "find all genres for a title"
+  @@index([genreId]) // "find all titles in a genre"
+  @@map("title_genres")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIBRARY ENTRY
+// The core tracking entity. One row per (user, title) pair.
+// The @@unique([userId, titleId]) constraint prevents a user from adding
+// the same title twice — enforced at DB level, not just application level.
+// currentChapter and currentEpisode use optimistic locking (version column)
+// to prevent lost updates when a user has the app open on two devices.
+// ─────────────────────────────────────────────────────────────────────────────
+model LibraryEntry {
+  id                  String               @id @default(uuid()) @db.Uuid
+  userId              String               @map("user_id") @db.Uuid
+  titleId             String               @map("title_id") @db.Uuid
+  status              String               @default("plan_to_read")
+  // 'reading' | 'completed' | 'on_hold' | 'dropped' | 'plan_to_read' | 'seed'
+  currentChapter      Int                  @default(0) @map("current_chapter")
+  currentEpisode      Int                  @default(0) @map("current_episode")
+  currentVolume       Int                  @default(0) @map("current_volume")
+  rating              Int?
+  // 1-10 score. null = unrated.
+  notes               String?
+  // Private journal-style notes. Only visible to the owner.
+  startDate           DateTime?            @map("start_date")
+  finishDate          DateTime?            @map("finish_date")
+  isFavourite         Boolean              @default(false) @map("is_favourite")
+  version             Int                  @default(0)
+  // Optimistic locking: UPDATE ... WHERE version = :v. If version changed
+  // since the user loaded the page, the update fails → retry.
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  //"This LibraryEntry belongs to one User. The join condition is: my userId column equals the User's id. This is not a database column — it's a TypeScript navigation handle. If the User is deleted, delete this LibraryEntry too."
+  title               Title                @relation(fields: [titleId], references: [id], onDelete: Cascade)
+  favouriteCharacters FavouriteCharacter[]
+
+  @@unique([userId, titleId]) // One entry per user per title
+  @@index([userId, status]) // "find all reading entries for user" — library pa
+  @@index([userId, isFavourite]) // "find all favourites for user"
+  @@index([userId, createdAt]) // Pagination: "user's library sorted by added date
+  @@index([titleId]) // "how many users have this title saved" — analyti
+  @@index([status, updatedAt]) // "recently updated reading entries" — activity fe
+  @@map("library_entries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FAVOURITE CHARACTER
+// Characters a user has marked as favourite for a specific library entry.
+// Stored with a reference to the library entry (not just title)
+// so that if a user removes a title from their library, characters go with it.
+//─────────────────────────────────────────────────────────────────────────────
+
+model FavouriteCharacter {
+  id             String       @id @default(uuid()) @db.Uuid
+  libraryEntryId String       @map("library_entry_id") @db.Uuid
+  characterName  String       @map("character_name")
+  characterImage String?      @map("character_image")
+  notes          String?
+  createdAt      DateTime     @default(now()) @map("created_at")
+  libraryEntry   LibraryEntry @relation(fields: [libraryEntryId], references: [id], onDelete: Cascade)
+
+  @@index([libraryEntryId])
+  @@map("favourite_characters")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FRIENDSHIP
+// Bidirectional single-row pattern:
+// One row represents the relationship between two users.
+// WRONG approach: two rows (user A → user B, user B → user A)
+// - Requires deduplication on every query
+// - Can get out of sync (one row says accepted, the other says pending)
+// CORRECT approach: one row, query both directions
+// WHERE (requesterId = :me OR addresseeId = :me) AND status = 'accepted'
+// CHECK constraint (added via raw SQL migration):
+// CHECK (requester_id < addressee_id)
+// This enforces that requesterId is always the "smaller" UUID string,
+// preventing two rows for the same pair (A→B and B→A) from coexisting.
+// The pair (A, B) where A < B is always the canonical representation.
+//WHY? : WITHOUT the constraint: User A (uuid: "aaa-111") sends a request to User B (uuid: "bbb-222") -> Row stored: requesterId = "aaa-111", addresseeId = "bbb-222"
+//Later, User B (uuid: "bbb-222") also tries to send a request to User A (uuid: "aaa-111") -> Row stored: requesterId = "bbb-222", addresseeId = "aaa-111"
+//Now you have TWO rows representing the same relationship. The @@unique([requesterId, addresseeId]) constraint does NOT catch this because (aaa-111, bbb-222) and (bbb-222, aaa-111) are different combinations.
+//What the CHECK Does: The CHECK constraint enforces a canonical ordering rule before the row is inserted. It says: the requesterId must always be the UUID that is alphabetically/lexicographically smaller.
+//No matter WHO actually initiated the request.— the person with the smaller UUID might not be the one who sent the friend request. The constraint does not care about that. It is purely about storage format.
+//If we keep this rule the names become misleading cuz they do not mean sender or reciever now and who sent the request or recieved it doesnt matter or is stored
+// ─────────────────────────────────────────────────────────────────────────────
+model Friendship {
+  id          String   @id @default(uuid()) @db.Uuid
+  requesterId String   @map("requester_id") @db.Uuid
+  addresseeId String   @map("addressee_id") @db.Uuid
+  status      String   @default("pending")
+  // 'pending' | 'accepted' | 'declined' | 'blocked'
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  requester   User     @relation("FriendshipRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  addressee   User     @relation("FriendshipAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+  // Bidirectional index: both columns indexed separately so both query directions a
+
+  @@unique([requesterId, addresseeId])
+  @@index([requesterId, status]) // "find all pending requests I sent"
+  @@index([addresseeId, status]) // "find all pending requests I received"
+  // Ensures only one friendship record per pair regardless of direction.
+  @@map("friendships")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMENT
+// Supports nested replies via the Closure Table pattern (see comment_ancestors).
+// parentId for simple single-level reply lookup.
+// isDeleted: soft delete — content replaced with "[removed]" in responses.
+// Thread structure is preserved even when a comment is deleted.
+// ─────────────────────────────────────────────────────────────────────────────
+model Comment {
+  id           String            @id @default(uuid()) @db.Uuid
+  userId       String            @map("user_id") @db.Uuid
+  titleId      String            @map("title_id") @db.Uuid
+  parentId     String?           @map("parent_id") @db.Uuid
+  // null = top-level comment. Non-null = reply to parentId.
+  body         String
+  isDeleted    Boolean           @default(false) @map("is_deleted")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title        Title             @relation(fields: [titleId], references: [id], onDelete: Cascade)
+  parent       Comment?          @relation("CommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies      Comment[]         @relation("CommentReplies")
+  // Closure table relationships
+  asAncestor   CommentAncestor[] @relation("AncestorComment")
+  asDescendant CommentAncestor[] @relation("DescendantComment")
+  reactions    CommentReaction[]
+
+  @@index([titleId, createdAt]) // "find top-level comments for a title
+  @@index([userId]) // "find all comments by a user"
+  @@index([parentId]) // "find direct replies to a comment"
+  @@map("comments")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMENT ANCESTOR — Closure Table for nested comments
+// Stores ALL ancestor-descendant pairs, not just parent-child.
+//
+// For a thread: Root → Child → Grandchild
+// Rows stored:
+// (Root, Root, 0) — a node is its own ancestor at depth 0
+// (Root, Child, 1) — Child is 1 level below Root
+// (Root, Grandchild, 2) — Grandchild is 2 levels below Root
+// (Child, Child, 0) — self-referential
+// (Child, Grandchild, 1)
+// (Grandchild, Grandchild, 0)
+//
+// WHY NOT ADJACENCY LIST (just parentId)?
+// Fetching a thread with parentId: need recursive CTE or N+1 queries.
+// Fetching a thread with closure table: one JOIN on descendantId.
+//
+// WHY NOT NESTED SETS?
+// Inserts require updating left/right values of all subsequent nodes — O(n) write
+// Closure table inserts are O(depth) — much cheaper.
+// ─────────────────────────────────────────────────────────────────────────────
+model CommentAncestor {
+  ancestorId   String  @map("ancestor_id") @db.Uuid
+  descendantId String  @map("descendant_id") @db.Uuid
+  depth        Int // 0 = self, 1 = parent, 2 = grandparent, etc.
+  ancestor     Comment @relation("AncestorComment", fields: [ancestorId], references: [id], onDelete: Cascade)
+  descendant   Comment @relation("DescendantComment", fields: [descendantId], references: [id], onDelete: Cascade)
+
+  @@id([ancestorId, descendantId])
+  @@index([ancestorId]) // "find all descendants of a node" (fetch whole thread)
+  @@index([descendantId]) // "find all ancestors of a node" (breadcrumb path)
+  @@map("comment_ancestors")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMENT REACTION
+// COMMENT REACTION
+// Emoji reactions on comments. One reaction type per user per comment.
+// @@unique([commentId, userId, emoji]) prevents duplicate reactions.
+// Counts are aggregated and cached in Redis for fast reads.
+// ─────────────────────────────────────────────────────────────────────────────
+model CommentReaction {
+  id        String  @id @default(uuid()) @db.Uuid
+  commentId String  @map("comment_id") @db.Uuid
+  userId    String  @map("user_id") @db.Uuid
+  emoji     String // Validated server-side against allowed set
+  comment   Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId, emoji])
+  @@index([commentId]) // "find all reactions for a comment"
+  @@map("comment_reactions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIVITY FEED
+// Fan-out on write: when a user performs an action, the event is written to
+// every follower/friend's feed. This is a denormalised, write-heavy design.
+// ALTERNATIVE: Fan-out on read (query friends' activities at read time).
+// WHY NOT fan-out on read?
+// With 1000 friends, reading the feed requires querying 1000 users' activities
+// and merging/sorting them — expensive at read time, especially under load.
+// Fan-out on write is expensive at write time (write to N feeds) but O(1) at
+// read time. Acceptable trade-off for a social app where reads >> writes.
+// ─────────────────────────────────────────────────────────────────────────────
+model ActivityFeed {
+  id          String   @id @default(uuid()) @db.Uuid
+  recipientId String   @map("recipient_id") @db.Uuid
+  // The user who should see this activity in their feed
+  actorId     String   @map("actor_id") @db.Uuid
+  // The user who performed the action
+  type        String
+  // 'library_add' | 'library_complete' | 'rating_given' | 'friend_accepted'
+  titleId     String?  @map("title_id") @db.Uuid
+  // null for non-title activities (e.g., friend_accepted)
+  metadata    Json     @default("{}")
+  // Flexible JSON: { status: 'completed', rating: 9 }
+  isRead      Boolean  @default(false) @map("is_read")
+  createdAt   DateTime @default(now()) @map("created_at")
+  recipient   User     @relation("FeedRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actor       User     @relation("FeedActor", fields: [actorId], references: [id], onDelete: Cascade)
+  title       Title?   @relation(fields: [titleId], references: [id], onDelete: SetNull)
+
+  @@index([recipientId, createdAt]) // Primary: "load my feed, newest first"
+  @@index([recipientId, isRead]) // "count my unread feed items"
+  @@index([actorId, createdAt]) // "all activities performed by user X" (profil
+  @@map("activity_feed")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATION
+// In-app notifications. Separate from activity feed:
+// ActivityFeed: "your friend just finished Berserk" (social context)
+// Notification: "someone liked your comment" (directed at you)
+// ─────────────────────────────────────────────────────────────────────────────
+model Notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  type      String
+  // 'friend_request' | 'friend_accepted' | 'comment_reply' | 'title_update' | 'syst
+  title     String
+  body      String
+  isRead    Boolean  @default(false) @map("is_read")
+  linkUrl   String?  @map("link_url")
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead]) // "find unread notifications for user"
+  @@index([userId, createdAt]) // "find recent notifications for user"
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ONBOARDING SELECTION
+// Stores the genre and title selections made during onboarding.
+// These are the cold-start seeds for the recommendation engine.
+// Status 'seed' in LibraryEntry identifies these programmatic additions.
+// ─────────────────────────────────────────────────────────────────────────────
+model OnboardingSelection {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  titleId   String?  @map("title_id") @db.Uuid
+  // null for genre-only selections
+  genreSlug String?  @map("genre_slug")
+  // null for title-only selections
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     Title?   @relation(fields: [titleId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@map("onboarding_selections")
+}
+//Add advanced indexes via raw SQL migration:
+//Prisma does not support GIN indexes or CHECK constraints in schema.prisma syntax. We add them via a separate migration:
+//pnpm prisma migrate dev --name add_advanced_indexes --create-only
+//createonly: creates the migration but doesnt apply it yet
